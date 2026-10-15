@@ -1,0 +1,19 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.vscode/
+.DS_Store
+Thumbs.db
