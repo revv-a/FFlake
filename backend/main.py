@@ -296,6 +296,18 @@ def validate_proposal_edge(source: str, target: str, edge_id: str) -> None:
         )
 
 
+@app.get("/api/workflows/proposals")
+def get_proposals():
+    try:
+        return {
+            "proposals": list_proposals(),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load proposals: {exc}",
+        ) from exc
+
 
 @app.post("/api/workflows/proposals")
 def propose_fix(payload: ProposalCreateRequest):
