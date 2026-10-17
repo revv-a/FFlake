@@ -1,18 +1,25 @@
 
 from datetime import datetime, timezone
-
+from uuid import uuid4
+from fflake_graph.db import run_query
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from falkordb import FalkorDB
 from pydantic import BaseModel, Field
 
 from fflake_graph.router import router as graph_hacks_router
-
+from workflow_store import (
+    create_proposal,
+    list_investigations,
+    list_proposals,
+    save_verification,
+    set_proposal_status,
+)
 
 app = FastAPI(
     title="FFlake API",
     description="Capability-path security investigation engine",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -36,9 +43,27 @@ class AgentRunRequest(BaseModel):
     request: str = Field(min_length=1, max_length=2000)
 
 
+class ProposalCreateRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=100)
+    source: str = Field(min_length=1, max_length=200)
+    target: str = Field(min_length=1, max_length=200)
+    edge_id: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=1000)
+
+
+class ProposalDecisionRequest(BaseModel):
+    decision: str
+
+
+app_version = "0.3.0"
+
+
 @app.get("/")
 def root():
-    return {"message": "FFlake API is running"}
+    return {
+        "message": "FFlake API is running",
+        "version": app_version,
+    }
 
 
 @app.get("/health")
@@ -166,7 +191,6 @@ def rank_chokepoints():
         for row in result.result_set:
             path_nodes = row[0]
 
-            # Exclude the untrusted source and final data sink.
             for node in path_nodes[1:-1]:
                 node_id = node["id"]
 
@@ -244,4 +268,226 @@ def run_agent_endpoint(payload: AgentRunRequest):
                 f"Agent execution failed: "
                 f"{type(exc).__name__}: {exc}"
             ),
+        ) from exc
+
+
+# Workflow: persistent investigation history
+
+@app.get("/api/workflows/investigations")
+def get_investigations(limit: int = 50):
+    try:
+        return {
+            "investigations": list_investigations(limit),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not load investigations: {exc}",
+        ) from exc
+
+
+# Workflow: proposed fixes
+
+def validate_proposal_edge(source: str, target: str, edge_id: str) -> None:
+    """Require the proposed edge to exist on a path from source to target."""
+    try:
+        rows = run_query(
+            """
+            MATCH (s:FFAsset)-[r:FF_REL]->(t:FFAsset)
+            RETURN s.id, r.id, t.id
+            """
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not validate the proposed edge against the graph",
+        ) from exc
+
+    edges = [
+        (str(row[0]), str(row[1]), str(row[2]))
+        for row in rows
+    ]
+
+    matching_edges = [
+        (start, end)
+        for start, edge, end in edges
+        if edge == edge_id
+    ]
+
+    if not matching_edges:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Edge '{edge_id}' was not found in the graph",
+        )
+
+    adjacency: dict[str, set[str]] = {}
+    for start, _, end in edges:
+        adjacency.setdefault(start, set()).add(end)
+
+    def reachable(start: str, goal: str) -> bool:
+        pending = [start]
+        visited: set[str] = set()
+
+        while pending:
+            current = pending.pop()
+
+            if current == goal:
+                return True
+
+            if current in visited:
+                continue
+
+            visited.add(current)
+            pending.extend(adjacency.get(current, set()) - visited)
+
+        return False
+
+    # The proposed edge can be an intermediate edge on the path.
+    # It does not have to connect the source directly to the target.
+    if not any(
+        reachable(source, edge_start)
+        and reachable(edge_end, target)
+        for edge_start, edge_end in matching_edges
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Edge '{edge_id}' is not on a directed path "
+                f"from '{source}' to '{target}'"
+            ),
+        )
+
+
+
+@app.post("/api/workflows/proposals")
+def propose_fix(payload: ProposalCreateRequest):
+    try:
+        validate_proposal_edge(
+            source=payload.source,
+            target=payload.target,
+            edge_id=payload.edge_id,
+        )
+
+        proposal_id = str(uuid4())
+        proposal = create_proposal(
+            proposal_id=proposal_id,
+            run_id=payload.run_id,
+            source=payload.source,
+            target=payload.target,
+            edge_id=payload.edge_id,
+            description=payload.description,
+        )
+        return proposal
+
+    except HTTPException:
+        raise
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not create proposal: {exc}",
+        ) from exc
+
+
+# Workflow: explicit human decision
+
+@app.post("/api/workflows/proposals/{proposal_id}/decision")
+def decide_proposal(
+    proposal_id: str,
+    payload: ProposalDecisionRequest,
+):
+    decision = payload.decision.strip().lower()
+
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Decision must be 'approved' or 'rejected'",
+        )
+
+    try:
+        proposal = set_proposal_status(proposal_id, decision)
+        return {
+            "proposal": proposal,
+            "real_changes_performed": False,
+            "message": (
+                "Proposal decision recorded. No infrastructure "
+                "was modified."
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not record decision: {exc}",
+        ) from exc
+
+
+# Workflow: simulation-only verification of an approved proposal
+
+@app.post("/api/workflows/proposals/{proposal_id}/verify")
+def verify_proposal(proposal_id: str):
+    try:
+        proposals = list_proposals()
+        proposal = next(
+            (
+                item for item in proposals
+                if item["proposal_id"] == proposal_id
+            ),
+            None,
+        )
+
+        if proposal is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Proposal was not found",
+            )
+
+        if proposal["status"] != "approved":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Only approved proposals can be verified. "
+                    "Approve the proposal first."
+                ),
+            )
+
+        from fflake_graph.engine import verify_simulated_cut
+
+        verification = verify_simulated_cut(
+            source=proposal["source"],
+            target=proposal["target"],
+            cut_edge_id=proposal["edge_id"],
+        )
+
+        # Only persist a successful simulation verification.
+        saved = save_verification(
+            proposal_id,
+            verification,
+        )
+
+        return {
+            "proposal": saved,
+            "verification": verification,
+            "real_changes_performed": False,
+            "message": (
+                "Simulation verification completed. "
+                "No infrastructure was modified."
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Simulation verification failed: {exc}",
         ) from exc

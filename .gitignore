@@ -17,3 +17,13 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local workflow databases
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local source backups
+*.backup
+*.phase1-backup

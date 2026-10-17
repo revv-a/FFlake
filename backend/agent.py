@@ -4,12 +4,14 @@ from typing import Any
 from uuid import uuid4
 
 from agent_tools import execute_tool
+from workflow_store import save_investigation
 
 
 def run_agent(request: str) -> dict[str, Any]:
-    """Run a deterministic security-investigation workflow."""
+    """Run a deterministic, simulation-only security investigation."""
 
     request = request.strip()
+
     if not request:
         raise ValueError("Request cannot be empty")
 
@@ -17,11 +19,11 @@ def run_agent(request: str) -> dict[str, Any]:
     run_id = str(uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # These are the demo graph's default endpoints.
-    # Explicit IDs can be supplied as source=... target=...
+    # Default endpoints for the demo graph.
     source = "external-bot"
     target = "prod-secrets"
 
+    # Optional arguments: source=... target=...
     for token in request.split():
         if token.startswith("source="):
             source = token[len("source="):].strip()
@@ -31,6 +33,7 @@ def run_agent(request: str) -> dict[str, Any]:
     if not source or not target:
         raise ValueError("Source and target must be non-empty")
 
+    # Decide which investigation tool to run.
     if "verify" in normalized or "simulate fix" in normalized:
         cut_edge_id = None
 
@@ -39,9 +42,10 @@ def run_agent(request: str) -> dict[str, Any]:
                 cut_edge_id = token[len("edge="):].strip()
 
         if not cut_edge_id:
-            return {
+            response = {
                 "run_id": run_id,
                 "timestamp": timestamp,
+                "request": request,
                 "status": "needs_input",
                 "message": (
                     "Provide an edge ID, for example "
@@ -49,6 +53,8 @@ def run_agent(request: str) -> dict[str, Any]:
                 ),
                 "available_tools": ["verify_simulated_cut"],
             }
+            save_investigation(response)
+            return response
 
         tool_name = "verify_simulated_cut"
         arguments = {
@@ -57,14 +63,22 @@ def run_agent(request: str) -> dict[str, Any]:
             "cut_edge_id": cut_edge_id,
         }
 
-    elif "path" in normalized or "investigate" in normalized or "risk" in normalized:
+    elif (
+        "path" in normalized
+        or "investigate" in normalized
+        or "risk" in normalized
+    ):
         tool_name = "analyze_path"
-        arguments = {"source": source, "target": target}
+        arguments = {
+            "source": source,
+            "target": target,
+        }
 
     else:
-        return {
+        response = {
             "run_id": run_id,
             "timestamp": timestamp,
+            "request": request,
             "status": "needs_clarification",
             "message": (
                 "Ask me to investigate a path or simulate a fix. "
@@ -72,10 +86,13 @@ def run_agent(request: str) -> dict[str, Any]:
                 "target=prod-secrets"
             ),
         }
+        save_investigation(response)
+        return response
 
+    # Execute the selected tool.
     result = execute_tool(tool_name, arguments)
 
-    return {
+    response = {
         "run_id": run_id,
         "timestamp": timestamp,
         "status": "completed",
@@ -86,7 +103,10 @@ def run_agent(request: str) -> dict[str, Any]:
             "reason": (
                 "The request asks for graph path analysis."
                 if tool_name == "analyze_path"
-                else "The request asks to verify a simulated edge exclusion."
+                else (
+                    "The request asks to verify a simulated "
+                    "edge exclusion."
+                )
             ),
         },
         "result": result,
@@ -96,3 +116,8 @@ def run_agent(request: str) -> dict[str, Any]:
             "simulation_only": True,
         },
     }
+
+    # Save every completed investigation to the local workflow store.
+    save_investigation(response)
+
+    return response

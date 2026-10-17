@@ -10,6 +10,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import './App.css'
+import './WorkflowCenter.css'
 
 const API = 'http://127.0.0.1:8000'
 
@@ -68,6 +69,30 @@ type Verification = {
   important?: string
 }
 
+type Investigation = {
+  run_id: string
+  timestamp: string
+  request: string
+  status: string
+  result?: {
+    decision?: { arguments?: { source?: string; target?: string } }
+    result?: unknown
+  }
+}
+
+type Proposal = {
+  proposal_id: string
+  run_id: string
+  source: string
+  target: string
+  edge_id: string
+  description: string
+  status: 'pending' | 'approved' | 'rejected' | 'verified'
+  created_at: string
+  updated_at: string
+  verification?: Verification | null
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
     ...options,
@@ -101,6 +126,15 @@ function App() {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [investigations, setInvestigations] = useState<Investigation[]>([])
+const [proposals, setProposals] = useState<Proposal[]>([])
+const [selectedRunId, setSelectedRunId] = useState('')
+const [agentRequest, setAgentRequest] = useState(
+  'investigate source=external-bot target=prod-secrets',
+)
+const [proposalDescription, setProposalDescription] = useState(
+  'Restrict the selected capability edge to reduce risky reachability.',
+)
 
   async function runAction(label: string, action: () => Promise<void>) {
     setBusy(label)
@@ -123,8 +157,99 @@ function App() {
     })
   }
 
+  async function loadWorkflowData(showNotice = false) {
+    const [historyResult, proposalResult] = await Promise.all([
+      request<{ investigations: Investigation[] }>('/api/workflows/investigations'),
+      request<{ proposals: Proposal[] }>('/api/workflows/proposals'),
+    ])
+
+    const runs = historyResult.investigations ?? []
+    setInvestigations(runs)
+    setProposals(proposalResult.proposals ?? [])
+    setSelectedRunId(current =>
+      current && runs.some(run => run.run_id === current)
+        ? current
+        : runs[0]?.run_id ?? '',
+    )
+    if (showNotice) setNotice('Investigation history and proposals refreshed.')
+  }
+
+  async function refreshWorkflowData() {
+    await runAction('workflow-refresh', async () => {
+      await loadWorkflowData(true)
+    })
+  }
+
+  async function runAgentInvestigation() {
+    await runAction('agent', async () => {
+      const result = await request<Investigation>('/api/agent/run', {
+        method: 'POST',
+        body: JSON.stringify({ request: agentRequest }),
+      })
+      await loadWorkflowData()
+      setSelectedRunId(result.run_id)
+      setNotice(`Investigation saved. Status: ${result.status}.`)
+    })
+  }
+
+  async function createProposal() {
+    const run = investigations.find(item => item.run_id === selectedRunId)
+    if (!run) {
+      setError('Select a saved investigation first, or run a new investigation.')
+      return
+    }
+    if (!selectedEdge) {
+      setError('Analyze risk and select a candidate edge first.')
+      return
+    }
+
+    const runSource = run.result?.decision?.arguments?.source ?? source
+    const runTarget = run.result?.decision?.arguments?.target ?? target
+
+    await runAction('proposal-create', async () => {
+      await request<Proposal>('/api/workflows/proposals', {
+        method: 'POST',
+        body: JSON.stringify({
+          run_id: selectedRunId,
+          source: runSource,
+          target: runTarget,
+          edge_id: selectedEdge,
+          description: proposalDescription.trim(),
+        }),
+      })
+      await loadWorkflowData()
+      setNotice('Proposal created. Human approval is required before verification.')
+    })
+  }
+
+  async function decideProposal(proposalId: string, decision: 'approved' | 'rejected') {
+    await runAction(`decision-${proposalId}`, async () => {
+      await request(`/api/workflows/proposals/${proposalId}/decision`, {
+        method: 'POST',
+        body: JSON.stringify({ decision }),
+      })
+      await loadWorkflowData()
+      setNotice(`Proposal ${decision}. No infrastructure was changed.`)
+    })
+  }
+
+  async function verifyProposal(proposalId: string) {
+    await runAction(`verify-${proposalId}`, async () => {
+      await request(`/api/workflows/proposals/${proposalId}/verify`, {
+        method: 'POST',
+      })
+      await loadWorkflowData()
+      setNotice('Simulation verification was saved to the proposal.')
+    })
+  }
+
   useEffect(() => {
-    void checkHealth()
+    void (async () => {
+      await checkHealth()
+      await runAction('workflow-load', async () => {
+        await loadWorkflowData()
+      })
+    })()
   }, [])
 
   async function seedGraph() {
@@ -516,6 +641,156 @@ function App() {
               </div>
             )}
           </article>
+        </section>
+
+        <section className="workflow-center">
+          <div className="panel-heading">
+            <div>
+              <div className="eyebrow">PERSISTENT WORKFLOWS</div>
+              <h2>Workflow Center</h2>
+            </div>
+            <button className="button secondary" onClick={refreshWorkflowData} disabled={!!busy}>
+              {busy === 'workflow-refresh' ? 'Refreshing…' : 'Refresh workflows'}
+            </button>
+          </div>
+
+          <article className="panel workflow-panel">
+            <div className="eyebrow">NEW INVESTIGATION</div>
+            <h2>Run and save an investigation</h2>
+            <p className="workflow-help">
+              Example: investigate source=external-bot target=prod-secrets
+            </p>
+            <label className="workflow-field">
+              <span>INVESTIGATION REQUEST</span>
+              <input
+                value={agentRequest}
+                onChange={event => setAgentRequest(event.target.value)}
+                maxLength={2000}
+                placeholder="investigate source=external-bot target=prod-secrets"
+              />
+            </label>
+            <button className="button primary" onClick={runAgentInvestigation} disabled={!!busy || !agentRequest.trim()}>
+              {busy === 'agent' ? 'Running investigation…' : 'Run agent investigation'}
+            </button>
+          </article>
+
+          <div className="workflow-columns">
+            <article className="panel workflow-panel">
+              <div className="panel-heading">
+                <div>
+                  <div className="eyebrow">SAVED RUNS</div>
+                  <h2>Investigation history</h2>
+                </div>
+                <span className="pill pill-neutral">{investigations.length} runs</span>
+              </div>
+
+              {investigations.length > 0 ? (
+                <div className="workflow-list">
+                  {investigations.map(run => (
+                    <button
+                      type="button"
+                      key={run.run_id}
+                      className={`workflow-item ${selectedRunId === run.run_id ? 'workflow-item-selected' : ''}`}
+                      onClick={() => setSelectedRunId(run.run_id)}
+                    >
+                      <span className="workflow-item-top">
+                        <strong>{run.request || 'Untitled investigation'}</strong>
+                        <span className="pill pill-neutral">{run.status}</span>
+                      </span>
+                      <small>{Number.isNaN(Date.parse(run.timestamp)) ? run.timestamp : new Date(run.timestamp).toLocaleString()}</small>
+                      <small className="workflow-id">Run: {run.run_id}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <strong>No saved investigations yet</strong>
+                  <p>Run an investigation above to populate this history.</p>
+                </div>
+              )}
+            </article>
+
+            <article className="panel workflow-panel">
+              <div className="panel-heading">
+                <div>
+                  <div className="eyebrow">HUMAN REVIEW</div>
+                  <h2>Remediation proposals</h2>
+                </div>
+                <span className="pill pill-purple">{proposals.length} proposals</span>
+              </div>
+
+              <label className="workflow-field">
+                <span>PROPOSAL DESCRIPTION</span>
+                <input
+                  value={proposalDescription}
+                  onChange={event => setProposalDescription(event.target.value)}
+                  maxLength={1000}
+                />
+              </label>
+              <button
+                className="button primary"
+                onClick={createProposal}
+                disabled={!!busy || !selectedRunId || !selectedEdge || !proposalDescription.trim()}
+              >
+                {busy === 'proposal-create' ? 'Creating…' : 'Create proposal from selected edge'}
+              </button>
+              <p className="workflow-help">
+                Selected run: {selectedRunId || 'None'} · Selected edge: {selectedEdge || 'Analyze risk first'}
+              </p>
+
+              {proposals.length > 0 ? (
+                <div className="workflow-list">
+                  {proposals.map(proposal => (
+                    <div className="workflow-item proposal-item" key={proposal.proposal_id}>
+                      <span className="workflow-item-top">
+                        <strong>{proposal.edge_id}</strong>
+                        <span className={`pill ${proposal.status === 'verified' ? 'pill-green' : proposal.status === 'approved' ? 'pill-purple' : 'pill-neutral'}`}>
+                          {proposal.status.toUpperCase()}
+                        </span>
+                      </span>
+                      <p>{proposal.description}</p>
+                      <small>{proposal.source} → {proposal.target}</small>
+                      <small className="workflow-id">Proposal: {proposal.proposal_id}</small>
+
+                      {proposal.status === 'pending' && (
+                        <div className="workflow-actions">
+                          <button className="button primary" onClick={() => decideProposal(proposal.proposal_id, 'approved')} disabled={!!busy}>
+                            {busy === `decision-${proposal.proposal_id}` ? 'Saving…' : 'Approve'}
+                          </button>
+                          <button className="button secondary" onClick={() => decideProposal(proposal.proposal_id, 'rejected')} disabled={!!busy}>
+                            Reject
+                          </button>
+                        </div>
+                      )}
+
+                      {proposal.status === 'approved' && (
+                        <button className="button primary" onClick={() => verifyProposal(proposal.proposal_id)} disabled={!!busy}>
+                          {busy === `verify-${proposal.proposal_id}` ? 'Verifying…' : 'Verify in simulation'}
+                        </button>
+                      )}
+
+                      {proposal.verification && (
+                        <div className="verification-summary">
+                          <strong>{proposal.verification.verified_in_simulation ? 'No path in simulation' : 'Path remains in simulation'}</strong>
+                          <span>
+                            Baseline: {proposal.verification.baseline_path_count} · Remaining: {proposal.verification.remaining_path_count}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <strong>No proposals yet</strong>
+                  <p>Analyze risk above, select an edge, and create a proposal.</p>
+                </div>
+              )}
+              <p className="notice">
+                Approval records human intent only. Verification excludes an edge during graph search; it does not change production permissions.
+              </p>
+            </article>
+          </div>
         </section>
 
         <footer className="footer">

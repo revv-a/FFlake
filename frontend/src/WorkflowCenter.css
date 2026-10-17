@@ -1,0 +1,25 @@
+/* Workflow Center additions. Existing App.css remains unchanged. */
+.workflow-center { margin-top: 22px; }
+.workflow-center > .panel-heading { margin-bottom: 16px; }
+.workflow-panel { margin-bottom: 16px; }
+.workflow-panel h2 { margin: 8px 0 12px; font-size: 16px; }
+.workflow-help { color: #9299ad; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.workflow-field { display: flex; flex-direction: column; gap: 9px; margin: 16px 0; }
+.workflow-field > span { color: #949bb0; font: 9px 'DM Mono', monospace; letter-spacing: 1px; }
+.workflow-field input { width: 100%; min-width: 0; height: 42px; padding: 0 12px; color: #e9eaf4; border: 1px solid #353a4b; border-radius: 7px; outline: none; background: #0c0e15; font-size: 12px; }
+.workflow-field input:focus { border-color: #927aff; }
+.workflow-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.workflow-list { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.workflow-item { display: flex; flex-direction: column; align-items: stretch; gap: 9px; width: 100%; min-width: 0; padding: 14px; text-align: left; color: #e9eaf4; border: 1px solid #2b3040; border-radius: 9px; background: #10131c; }
+button.workflow-item { cursor: pointer; }
+button.workflow-item:hover, .workflow-item-selected { border-color: #8065ee; background: #19182a; }
+.workflow-item-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.workflow-item-top strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.workflow-item small { color: #9299ad; font-size: 10px; overflow-wrap: anywhere; }
+.workflow-id { font-family: 'DM Mono', monospace; }
+.proposal-item p { margin: 0; color: #c0c5d5; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.workflow-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.verification-summary { display: flex; flex-direction: column; gap: 7px; padding: 11px; border: 1px solid #26764a50; border-radius: 7px; background: #17452b20; font-size: 11px; }
+.verification-summary span { color: #a9b2c6; }
+@media (max-width: 900px) { .workflow-columns { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) { .workflow-item-top { flex-direction: column; } .workflow-panel { padding: 16px; } }
