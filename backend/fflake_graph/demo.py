@@ -1,13 +1,9 @@
-
 from __future__ import annotations
 
 from .db import run_query
 
-# Fictional example:
-# external bot -> webhook runner -> deploy identity -> secrets vault.
-#
-# This demonstrates graph reachability, not a claim about a real environment.
-# remediation_cost values are illustrative units, not real financial costs.
+# Fictional security graph for the FFlake demo.
+# Demonstrates graph reachability, not a real environment.
 
 NODES = [
     {
@@ -23,6 +19,13 @@ NODES = [
         "kind": "service",
         "risk": 5,
         "description": "Service that runs automation jobs.",
+    },
+    {
+        "id": "ci-runner",
+        "name": "CI Runner",
+        "kind": "service",
+        "risk": 6,
+        "description": "Continuous integration runner with deployment access.",
     },
     {
         "id": "deploy-identity",
@@ -62,12 +65,32 @@ EDGES = [
         "reason": "The runner can assume the deployment identity.",
     },
     {
+        "id": "edge-bot-ci",
+        "from": "external-bot",
+        "to": "ci-runner",
+        "kind": "CAN_TRIGGER",
+        "risk": 4,
+        "remediation_cost": 1,
+        "name": "can trigger CI workflows",
+        "reason": "The external bot can trigger CI workflows.",
+    },
+    {
+        "id": "edge-ci-deploy",
+        "from": "ci-runner",
+        "to": "deploy-identity",
+        "kind": "CAN_ASSUME",
+        "risk": 8,
+        "remediation_cost": 3,
+        "name": "can assume deployment identity through CI",
+        "reason": "The CI runner can assume the deployment identity.",
+    },
+    {
         "id": "edge-deploy-secrets",
         "from": "deploy-identity",
         "to": "prod-secrets",
         "kind": "CAN_ACCESS",
         "risk": 10,
-        "remediation_cost": 8,
+        "remediation_cost": 4,
         "name": "can access production secrets",
         "reason": "The deployment identity can access the vault.",
     },

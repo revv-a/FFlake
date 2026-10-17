@@ -85,70 +85,28 @@ def health():
 @app.post("/investigate")
 def investigate():
     try:
-        result = graph.query(
-            """
-            MATCH p = (s:UntrustedSource)-[*1..8]->(d:DataStore)
-            RETURN
-                [n IN nodes(p) |
-                    {id: n.id, name: n.name, labels: labels(n)}
-                ] AS path_nodes,
-                [r IN relationships(p) | type(r)] AS path_edges
-            LIMIT 100
-            """
-        )
+        from fflake_graph.engine import analyze
 
+        result = analyze("external-bot", "prod-secrets")
         findings = []
 
-        for row in result.result_set:
-            nodes = row[0]
-            edges = row[1]
-
-            labels = [
-                label
-                for node in nodes
-                for label in node["labels"]
-            ]
-
-            source_score = 25 if "UntrustedSource" in labels else 0
-            sink_score = 25 if "DataStore" in labels else 0
-            credential_score = 25 if "Credential" in labels else 0
-            hop_score = min(15, len(edges) * 2)
-            policy_protection = 0
-
-            score = min(
-                100,
-                source_score
-                + sink_score
-                + credential_score
-                + hop_score
-                - policy_protection,
-            )
-
-            findings.append(
-                {
-                    "finding_id": f"FF-{len(findings) + 1:03d}",
-                    "title": "Untrusted source can reach sensitive data",
-                    "risk_score": score,
-                    "severity": (
-                        "critical" if score >= 80
-                        else "high" if score >= 60
-                        else "medium" if score >= 35
-                        else "low"
-                    ),
-                    "path": {"nodes": nodes, "edges": edges},
-                    "score_breakdown": {
-                        "source_untrustedness": source_score,
-                        "sink_sensitivity": sink_score,
-                        "credential_privilege": credential_score,
-                        "hop_count": hop_score,
-                        "policy_protection_credit": policy_protection,
-                    },
-                    "interpretation": (
-                        "A modeled capability path was found. "
-                        "This does not prove exploitability."
-                    ),
-                }
-            )
+        for index, item in enumerate(result.get("paths", []), start=1):
+            findings.append({
+                "finding_id": f"FF-{index:03d}",
+                "title": "Untrusted source can reach sensitive data",
+                "risk_score": item.get("risk_score", 0),
+                "severity": item.get("risk_band", "unknown"),
+                "path": item,
+                "score_breakdown": {
+                    "edge_risk_total": item.get("risk_score", 0),
+                    "hop_count": item.get("hops", 0),
+                    "scoring_method": "sum of edge risk values",
+                },
+                "interpretation": (
+                    "A modeled capability path was found. "
+                    "This does not prove exploitability."
+                ),
+            })
 
         return {
             "investigation_id": datetime.now(timezone.utc).strftime(
@@ -157,6 +115,7 @@ def investigate():
             "graph": "fflake",
             "paths_found": len(findings),
             "findings": findings,
+            "claim_boundary": result.get("claim_boundary"),
         }
 
     except Exception as exc:
@@ -166,39 +125,24 @@ def investigate():
         ) from exc
 
 
+
 @app.get("/rank-chokepoints")
 def rank_chokepoints():
     try:
-        result = graph.query(
-            """
-            MATCH p = (s:UntrustedSource)-[*1..8]->(d:DataStore)
-            RETURN
-                [n IN nodes(p) |
-                    {
-                        id: n.id,
-                        name: n.name,
-                        labels: labels(n)
-                    }
-                ] AS path_nodes
-            LIMIT 100
-            """
-        )
+        from fflake_graph.engine import analyze
 
-        path_count = len(result.result_set)
+        result = analyze("external-bot", "prod-secrets")
+        paths = result.get("paths", [])
         counts = {}
-        node_details = {}
+        details = {}
 
-        for row in result.result_set:
-            path_nodes = row[0]
-
-            for node in path_nodes[1:-1]:
-                node_id = node["id"]
-
-                if node_id not in counts:
-                    counts[node_id] = 0
-                    node_details[node_id] = node
-
-                counts[node_id] += 1
+        for item in paths:
+            for node in item.get("nodes", [])[1:-1]:
+                node_id = node.get("id")
+                if not node_id:
+                    continue
+                counts[node_id] = counts.get(node_id, 0) + 1
+                details[node_id] = node
 
         ranked = sorted(
             counts.items(),
@@ -207,39 +151,32 @@ def rank_chokepoints():
         )
 
         chokepoints = []
-
         for node_id, count in ranked:
-            node = node_details[node_id]
-
-            chokepoints.append(
-                {
-                    "rank": len(chokepoints) + 1,
-                    "node_id": node_id,
-                    "name": node["name"],
-                    "labels": node["labels"],
-                    "paths_containing_node": count,
-                    "total_paths": path_count,
-                    "path_participation_percent": (
-                        round(100 * count / path_count, 2)
-                        if path_count
-                        else 0
-                    ),
-                    "interpretation": (
-                        "Candidate chokepoint; evaluate the impact "
-                        "of restricting this component."
-                    ),
-                }
-            )
+            node = details[node_id]
+            chokepoints.append({
+                "rank": len(chokepoints) + 1,
+                "node_id": node_id,
+                "name": node.get("name", node_id),
+                "kind": node.get("kind"),
+                "paths_containing_node": count,
+                "total_paths": len(paths),
+                "path_participation_percent": (
+                    round(100 * count / len(paths), 2) if paths else 0
+                ),
+                "interpretation": (
+                    "Candidate chokepoint; evaluate the impact "
+                    "of restricting this component."
+                ),
+            })
 
         return {
             "graph": "fflake",
-            "paths_analyzed": path_count,
+            "paths_analyzed": len(paths),
             "ranking_method": "dangerous_path_participation",
             "chokepoints": chokepoints,
             "limitations": (
-                "This ranks nodes by their participation in the "
-                "enumerated paths. It is not a minimum-cut result "
-                "or proof that removing a node is safe."
+                "Ranks nodes on enumerated paths only. This is not "
+                "a minimum-cut result or proof that removing a node is safe."
             ),
         }
 
@@ -248,6 +185,7 @@ def rank_chokepoints():
             status_code=500,
             detail=f"Chokepoint ranking failed: {exc}",
         ) from exc
+
 
 
 @app.post("/api/agent/run")
