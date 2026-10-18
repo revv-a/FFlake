@@ -4,6 +4,7 @@ from typing import Any
 from fflake_graph.engine import (
     analyze,
     find_paths,
+    rank_chokepoints,
     verify_simulated_cut,
 )
 
@@ -30,6 +31,11 @@ def get_paths(source: str, target: str) -> dict[str, Any]:
     }
 
 
+def get_chokepoints(source: str, target: str) -> dict[str, Any]:
+    """Rank intermediate nodes on paths between two graph assets."""
+    return rank_chokepoints(source, target)
+
+
 def verify_cut(
     source: str,
     target: str,
@@ -42,6 +48,7 @@ def verify_cut(
 TOOL_REGISTRY = {
     "analyze_path": analyze_path,
     "find_paths": get_paths,
+    "rank_chokepoints": get_chokepoints,
     "verify_simulated_cut": verify_cut,
 }
 
@@ -59,6 +66,7 @@ def execute_tool(
     required_arguments = {
         "analyze_path": {"source", "target"},
         "find_paths": {"source", "target"},
+        "rank_chokepoints": {"source", "target"},
         "verify_simulated_cut": {
             "source",
             "target",

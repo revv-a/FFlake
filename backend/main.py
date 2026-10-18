@@ -1,61 +1,153 @@
-
+import os
+import re
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
-from fflake_graph.db import run_query
-from fastapi import FastAPI, HTTPException
+
+# Ensure backend modules (agent, agent_tools, workflow_store) import
+# correctly regardless of the working directory uvicorn was started from.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from falkordb import FalkorDB
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from fflake_graph.db import run_query
+from fflake_graph.engine import analyze, find_paths, rank_chokepoints, require_entities
+from fflake_graph.errors import (
+    EntityNotFoundError,
+    GraphQueryError,
+    GraphUnavailableError,
+)
 from fflake_graph.router import router as graph_hacks_router
 from workflow_store import (
+    ConflictError,
+    NotFoundError,
     create_proposal,
+    get_proposal,
     list_investigations,
     list_proposals,
-    save_verification,
+    record_simulation,
     set_proposal_status,
 )
 
 app = FastAPI(
     title="FFlake API",
     description="Capability-path security investigation engine",
-    version="0.3.0",
+    version="0.4.0",
 )
+
+app_version = "0.4.0"
+
+# Entity, edge, and proposal ids are short slugs such as "external-bot".
+ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$"
+
+
+def _allowed_origins() -> list[str]:
+    """Dev origins plus any extra origins from FFLAKE_CORS_ORIGINS."""
+    origins = {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    }
+    extra = os.getenv("FFLAKE_CORS_ORIGINS", "")
+    for origin in extra.split(","):
+        origin = origin.strip()
+        if origin:
+            origins.add(origin)
+    return sorted(origins)
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=_allowed_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(graph_hacks_router, prefix="/api")
 
-db = FalkorDB(host="localhost", port=6379)
-graph = db.select_graph("fflake")
+
+@app.exception_handler(GraphUnavailableError)
+async def graph_unavailable_handler(
+    request: Request,
+    exc: GraphUnavailableError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": (
+                "The graph database is not reachable. Start the FalkorDB "
+                "container and check FALKORDB_HOST/FALKORDB_PORT. "
+                f"Technical detail: {exc}"
+            )
+        },
+    )
+
+
+@app.exception_handler(GraphQueryError)
+async def graph_query_handler(
+    request: Request,
+    exc: GraphQueryError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content={
+            "detail": (
+                "The graph database rejected the query. Check the server "
+                "logs for details."
+            )
+        },
+    )
+
+
+@app.exception_handler(EntityNotFoundError)
+async def entity_not_found_handler(
+    request: Request,
+    exc: EntityNotFoundError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "detail": str(exc),
+            "missing": list(exc.missing),
+        },
+    )
 
 
 class AgentRunRequest(BaseModel):
     request: str = Field(min_length=1, max_length=2000)
 
 
+class InvestigateRequest(BaseModel):
+    source: str | None = Field(
+        default=None, min_length=1, max_length=160, pattern=ID_PATTERN
+    )
+    target: str | None = Field(
+        default=None, min_length=1, max_length=160, pattern=ID_PATTERN
+    )
+
+
 class ProposalCreateRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=100)
-    source: str = Field(min_length=1, max_length=200)
-    target: str = Field(min_length=1, max_length=200)
-    edge_id: str = Field(min_length=1, max_length=200)
+    source: str = Field(min_length=1, max_length=200, pattern=ID_PATTERN)
+    target: str = Field(min_length=1, max_length=200, pattern=ID_PATTERN)
+    edge_id: str = Field(min_length=1, max_length=200, pattern=ID_PATTERN)
     description: str = Field(min_length=1, max_length=1000)
 
 
 class ProposalDecisionRequest(BaseModel):
-    decision: str
+    decision: str = Field(min_length=1, max_length=20)
 
 
-app_version = "0.3.0"
+def _validate_proposal_id(proposal_id: str) -> None:
+    if not re.match(ID_PATTERN, proposal_id):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid proposal id format",
+        )
 
 
 @app.get("/")
@@ -68,123 +160,71 @@ def root():
 
 @app.get("/health")
 def health():
-    try:
-        graph.query("RETURN 1")
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "graph": "fflake",
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Graph database unavailable: {exc}",
-        ) from exc
+    rows = run_query("RETURN 1")
+    return {
+        "status": "healthy",
+        "database": "connected" if rows else "empty",
+        "graph": "fflake",
+    }
 
 
 @app.post("/investigate")
-def investigate():
-    try:
-        from fflake_graph.engine import analyze
+def investigate(payload: InvestigateRequest | None = None):
+    """Backward-compatible investigate endpoint.
 
-        result = analyze("external-bot", "prod-secrets")
-        findings = []
+    Accepts an optional JSON body with source/target. With no body it keeps
+    the original external-bot -> prod-secrets demo scenario.
+    """
+    source = (payload.source if payload else None) or "external-bot"
+    target = (payload.target if payload else None) or "prod-secrets"
 
-        for index, item in enumerate(result.get("paths", []), start=1):
-            findings.append({
-                "finding_id": f"FF-{index:03d}",
-                "title": "Untrusted source can reach sensitive data",
-                "risk_score": item.get("risk_score", 0),
-                "severity": item.get("risk_band", "unknown"),
-                "path": item,
-                "score_breakdown": {
-                    "edge_risk_total": item.get("risk_score", 0),
-                    "hop_count": item.get("hops", 0),
-                    "scoring_method": "sum of edge risk values",
-                },
-                "interpretation": (
-                    "A modeled capability path was found. "
-                    "This does not prove exploitability."
-                ),
-            })
+    require_entities(source, target)
+    result = analyze(source, target)
+    findings = []
 
-        return {
-            "investigation_id": datetime.now(timezone.utc).strftime(
-                "INV-%Y%m%dT%H%M%SZ"
+    for index, item in enumerate(result.get("paths", []), start=1):
+        edge_risk_total = sum(
+            int(edge.get("risk") or 0) for edge in item.get("edges", [])
+        )
+        findings.append({
+            "finding_id": f"FF-{index:03d}",
+            "title": "Untrusted source can reach sensitive data",
+            "risk_score": item.get("risk_score", 0),
+            "severity": item.get("risk_band", "unknown"),
+            "path": item,
+            "scoring": {
+                "edge_risk_total": edge_risk_total,
+                "hop_count": item.get("hops", 0),
+                "scoring_method": "sum of edge risk values",
+            },
+            "interpretation": (
+                "A modeled capability path was found. "
+                "This does not prove exploitability."
             ),
-            "graph": "fflake",
-            "paths_found": len(findings),
-            "findings": findings,
-            "claim_boundary": result.get("claim_boundary"),
-        }
+        })
 
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Investigation failed: {exc}",
-        ) from exc
-
+    return {
+        "investigation_id": (
+            f"INV-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-"
+            f"{uuid4().hex[:8]}"
+        ),
+        "graph": "fflake",
+        "source": source,
+        "target": target,
+        "paths_found": len(findings),
+        "findings": findings,
+        "claim_boundary": result.get("claim_boundary"),
+    }
 
 
 @app.get("/rank-chokepoints")
-def rank_chokepoints():
-    try:
-        from fflake_graph.engine import analyze
-
-        result = analyze("external-bot", "prod-secrets")
-        paths = result.get("paths", [])
-        counts = {}
-        details = {}
-
-        for item in paths:
-            for node in item.get("nodes", [])[1:-1]:
-                node_id = node.get("id")
-                if not node_id:
-                    continue
-                counts[node_id] = counts.get(node_id, 0) + 1
-                details[node_id] = node
-
-        ranked = sorted(
-            counts.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-
-        chokepoints = []
-        for node_id, count in ranked:
-            node = details[node_id]
-            chokepoints.append({
-                "rank": len(chokepoints) + 1,
-                "node_id": node_id,
-                "name": node.get("name", node_id),
-                "kind": node.get("kind"),
-                "paths_containing_node": count,
-                "total_paths": len(paths),
-                "path_participation_percent": (
-                    round(100 * count / len(paths), 2) if paths else 0
-                ),
-                "interpretation": (
-                    "Candidate chokepoint; evaluate the impact "
-                    "of restricting this component."
-                ),
-            })
-
-        return {
-            "graph": "fflake",
-            "paths_analyzed": len(paths),
-            "ranking_method": "dangerous_path_participation",
-            "chokepoints": chokepoints,
-            "limitations": (
-                "Ranks nodes on enumerated paths only. This is not "
-                "a minimum-cut result or proof that removing a node is safe."
-            ),
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Chokepoint ranking failed: {exc}",
-        ) from exc
+def rank_chokepoints_endpoint(
+    source: str = "external-bot",
+    target: str = "prod-secrets",
+):
+    """Backward-compatible chokepoint ranking, now parameterized."""
+    require_entities(source, target)
+    return rank_chokepoints(source, target)
 
 
 
@@ -195,118 +235,50 @@ def run_agent_endpoint(payload: AgentRunRequest):
     try:
         return run_agent(payload.request)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GraphUnavailableError:
+        raise
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"Agent execution failed: "
-                f"{type(exc).__name__}: {exc}"
-            ),
+            detail="Agent execution failed. Check the server logs.",
         ) from exc
 
-
-# Workflow: persistent investigation history
 
 @app.get("/api/workflows/investigations")
 def get_investigations(limit: int = 50):
-    try:
-        return {
-            "investigations": list_investigations(limit),
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not load investigations: {exc}",
-        ) from exc
+    return {"investigations": list_investigations(limit)}
 
-
-# Workflow: proposed fixes
 
 def validate_proposal_edge(source: str, target: str, edge_id: str) -> None:
-    """Require the proposed edge to exist on a path from source to target."""
-    try:
-        rows = run_query(
-            """
-            MATCH (s:FFAsset)-[r:FF_REL]->(t:FFAsset)
-            RETURN s.id, r.id, t.id
-            """
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Could not validate the proposed edge against the graph",
-        ) from exc
+    """Require the proposed edge to exist on an enumerated source-target path.
 
-    edges = [
-        (str(row[0]), str(row[1]), str(row[2]))
-        for row in rows
-    ]
+    Uses the same bounded path discovery as analysis and verification so the
+    validation matches what a simulation would actually consider.
+    """
+    require_entities(source, target)
+    paths = find_paths(source, target)
 
-    matching_edges = [
-        (start, end)
-        for start, edge, end in edges
-        if edge == edge_id
-    ]
+    matching = any(
+        edge.get("id") == edge_id
+        for path in paths
+        for edge in path.get("edges", [])
+    )
 
-    if not matching_edges:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Edge '{edge_id}' was not found in the graph",
-        )
-
-    adjacency: dict[str, set[str]] = {}
-    for start, _, end in edges:
-        adjacency.setdefault(start, set()).add(end)
-
-    def reachable(start: str, goal: str) -> bool:
-        pending = [start]
-        visited: set[str] = set()
-
-        while pending:
-            current = pending.pop()
-
-            if current == goal:
-                return True
-
-            if current in visited:
-                continue
-
-            visited.add(current)
-            pending.extend(adjacency.get(current, set()) - visited)
-
-        return False
-
-    # The proposed edge can be an intermediate edge on the path.
-    # It does not have to connect the source directly to the target.
-    if not any(
-        reachable(source, edge_start)
-        and reachable(edge_end, target)
-        for edge_start, edge_end in matching_edges
-    ):
+    if not matching:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Edge '{edge_id}' is not on a directed path "
-                f"from '{source}' to '{target}'"
+                f"Edge '{edge_id}' is not on any enumerated path from "
+                f"'{source}' to '{target}'. Check the edge id or run the "
+                "analysis first."
             ),
         )
 
 
 @app.get("/api/workflows/proposals")
 def get_proposals():
-    try:
-        return {
-            "proposals": list_proposals(),
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to load proposals: {exc}",
-        ) from exc
+    return {"proposals": list_proposals()}
 
 
 @app.post("/api/workflows/proposals")
@@ -319,7 +291,7 @@ def propose_fix(payload: ProposalCreateRequest):
         )
 
         proposal_id = str(uuid4())
-        proposal = create_proposal(
+        return create_proposal(
             proposal_id=proposal_id,
             run_id=payload.run_id,
             source=payload.source,
@@ -327,31 +299,25 @@ def propose_fix(payload: ProposalCreateRequest):
             edge_id=payload.edge_id,
             description=payload.description,
         )
-        return proposal
-
-    except HTTPException:
-        raise
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not create proposal: {exc}",
-        ) from exc
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# Workflow: explicit human decision
+@app.get("/api/workflows/proposals/{proposal_id}")
+def get_proposal_endpoint(proposal_id: str):
+    _validate_proposal_id(proposal_id)
+    try:
+        return get_proposal(proposal_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 
 @app.post("/api/workflows/proposals/{proposal_id}/decision")
 def decide_proposal(
     proposal_id: str,
     payload: ProposalDecisionRequest,
 ):
+    _validate_proposal_id(proposal_id)
     decision = payload.decision.strip().lower()
 
     if decision not in {"approved", "rejected"}:
@@ -370,12 +336,16 @@ def decide_proposal(
                 "was modified."
             ),
         }
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=500,
-            detail=f"Could not record decision: {exc}",
+            detail="Could not record decision. Check the server logs.",
         ) from exc
 
 
@@ -383,61 +353,50 @@ def decide_proposal(
 
 @app.post("/api/workflows/proposals/{proposal_id}/verify")
 def verify_proposal(proposal_id: str):
+    _validate_proposal_id(proposal_id)
+
     try:
-        proposals = list_proposals()
-        proposal = next(
-            (
-                item for item in proposals
-                if item["proposal_id"] == proposal_id
-            ),
-            None,
-        )
+        proposal = get_proposal(proposal_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        if proposal is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Proposal was not found",
-            )
-
-        if proposal["status"] != "approved":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Only approved proposals can be verified. "
-                    "Approve the proposal first."
-                ),
-            )
-
-        from fflake_graph.engine import verify_simulated_cut
-
-        verification = verify_simulated_cut(
-            source=proposal["source"],
-            target=proposal["target"],
-            cut_edge_id=proposal["edge_id"],
-        )
-
-        # Only persist a successful simulation verification.
-        saved = save_verification(
-            proposal_id,
-            verification,
-        )
-
-        return {
-            "proposal": saved,
-            "verification": verification,
-            "real_changes_performed": False,
-            "message": (
-                "Simulation verification completed. "
-                "No infrastructure was modified."
-            ),
-        }
-
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    if proposal["status"] != "approved":
         raise HTTPException(
-            status_code=500,
-            detail=f"Simulation verification failed: {exc}",
-        ) from exc
+            status_code=409,
+            detail=(
+                "Only approved proposals can be verified. "
+                "Approve the proposal first."
+            ),
+        )
+
+    from fflake_graph.engine import verify_simulated_cut
+
+    verification = verify_simulated_cut(
+        source=proposal["source"],
+        target=proposal["target"],
+        cut_edge_id=proposal["edge_id"],
+    )
+
+    saved = record_simulation(proposal_id, verification)
+
+    if verification.get("verified_in_simulation"):
+        message = (
+            "Simulation verification completed: no enumerated path "
+            "remains after excluding the edge. No infrastructure was "
+            "modified."
+        )
+    else:
+        message = (
+            "Simulation completed but the fix was not verified: "
+            "enumerated paths remain after excluding the edge. The "
+            "proposal stays approved. No infrastructure was modified."
+        )
+
+    return {
+        "proposal": saved,
+        "verification": verification,
+        "real_changes_performed": False,
+        "message": message,
+    }
+
+

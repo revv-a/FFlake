@@ -1,0 +1,1 @@
+﻿FROM falkordb/falkordb:latest
