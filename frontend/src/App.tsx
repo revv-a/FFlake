@@ -407,8 +407,6 @@ const [proposalDescription, setProposalDescription] = useState(
 
         <div className="side-label">WORKSPACE</div>
         <div className="nav-item active">◇ <span>Graph investigation</span></div>
-        <div className="nav-item">âŒ˜ <span>Capability paths</span></div>
-        <div className="nav-item">â›¨ <span>Safety & verification</span></div>
 
         <div className="sidebar-bottom">
           <div className="status-line">
