@@ -42,9 +42,19 @@ type CandidateFix = {
   relationship?: string
   relationship_kind?: string
   risk?: number
+  remediation_cost?: number
+  cost_was_assumed?: boolean
   paths_blocked?: number
   remaining_path_count_after_simulated_cut?: number
   simulation_only?: boolean
+}
+
+type MinimumCostCut = {
+  edges: CandidateFix[]
+  total_remediation_cost: number
+  cost_assumption_used: boolean
+  simulation_only: boolean
+  claim_boundary?: string
 }
 
 type Analysis = {
@@ -54,6 +64,7 @@ type Analysis = {
   baseline_path_count: number
   paths: GraphPath[]
   candidate_fixes: CandidateFix[]
+  minimum_cost_cut?: MinimumCostCut
   claim_boundary?: string
 }
 
@@ -250,6 +261,8 @@ const [proposalDescription, setProposalDescription] = useState(
         await loadWorkflowData()
       })
     })()
+    // Initial connection and workflow load on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function seedGraph() {
@@ -560,6 +573,46 @@ const [proposalDescription, setProposalDescription] = useState(
 
             {analysis?.candidate_fixes?.length ? (
               <>
+                {analysis.minimum_cost_cut && (
+                  <div className="minimum-cut-card">
+                    <div className="eyebrow">RECOMMENDED MINIMUM-COST FIX</div>
+
+                    {analysis.minimum_cost_cut.edges.length > 0 ? (
+                      <>
+                        {analysis.minimum_cost_cut.edges.map(edge => (
+                          <div className="minimum-cut-edge" key={edge.edge_id}>
+                            <strong>{edge.edge_id}</strong>
+                            <span>{edge.relationship ?? edge.relationship_kind}</span>
+                            <small>
+                              Remediation cost: {edge.remediation_cost ?? 'Unknown'}
+                            </small>
+                          </div>
+                        ))}
+
+                        <div className="minimum-cut-total">
+                          <span>Total remediation cost</span>
+                          <strong>{analysis.minimum_cost_cut.total_remediation_cost}</strong>
+                        </div>
+                      </>
+                    ) : (
+                      <p>No minimum-cost edge recommendation returned.</p>
+                    )}
+
+                    <p className="workflow-help">
+                      {analysis.minimum_cost_cut.cost_assumption_used
+                        ? 'At least one remediation cost was assumed.'
+                        : 'Recommendation uses supplied remediation costs.'}
+                      {' '}Simulation only; no graph relationships are changed.
+                    </p>
+
+                    {analysis.minimum_cost_cut.claim_boundary && (
+                      <p className="workflow-help">
+                        {analysis.minimum_cost_cut.claim_boundary}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <label className="edge-picker">
                   <span>SELECT EDGE TO SIMULATE</span>
                   <select
@@ -589,6 +642,8 @@ const [proposalDescription, setProposalDescription] = useState(
                       <small>
                         {candidate.paths_blocked ?? 0} path(s) blocked in simulation ·{' '}
                         {candidate.remaining_path_count_after_simulated_cut ?? '—'} remaining
+                        <br />
+                        Remediation cost: {candidate.remediation_cost ?? 'Unknown'}
                       </small>
                     </button>
                   ))}

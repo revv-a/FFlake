@@ -850,3 +850,35 @@ pre {
     grid-template-columns: 1fr 1fr;
   }
 }
+.minimum-cut-card {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid #6366f1;
+  border-radius: 12px;
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.minimum-cut-edge {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  overflow-wrap: anywhere;
+}
+
+.minimum-cut-edge small {
+  opacity: 0.8;
+}
+
+.minimum-cut-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.35);
+}
