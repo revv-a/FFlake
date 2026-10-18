@@ -1,4 +1,4 @@
-﻿
+
 import { useEffect, useMemo, useState } from 'react'
 import {
   Background,
@@ -406,7 +406,7 @@ const [proposalDescription, setProposalDescription] = useState(
         </div>
 
         <div className="side-label">WORKSPACE</div>
-        <div className="nav-item active">â—ˆ <span>Graph investigation</span></div>
+        <div className="nav-item active">◇ <span>Graph investigation</span></div>
         <div className="nav-item">âŒ˜ <span>Capability paths</span></div>
         <div className="nav-item">â›¨ <span>Safety & verification</span></div>
 
@@ -427,12 +427,12 @@ const [proposalDescription, setProposalDescription] = useState(
             <p>Discover risky reachability. Investigate evidence. Verify proposed changes.</p>
           </div>
           <button className="button secondary" onClick={checkHealth} disabled={!!busy}>
-            â†» Refresh status
+            ↻ Refresh status
           </button>
         </header>
 
         <div className="connection-banner">
-          <div className="connection-icon">â—ˆ</div>
+          <div className="connection-icon">◇</div>
           <div className="connection-copy">
             <strong>{health ? 'FalkorDB is reachable' : 'Graph connection unavailable'}</strong>
             <span>{health ? 'Live graph health check passed.' : 'Check the backend and FalkorDB container.'}</span>
@@ -459,7 +459,7 @@ const [proposalDescription, setProposalDescription] = useState(
               <h2>Trace a capability path</h2>
             </div>
             <button className="button secondary" onClick={seedGraph} disabled={!!busy}>
-              {busy === 'seed' ? 'Seedingâ€¦' : 'â†» Seed demo graph'}
+              {busy === 'seed' ? 'Seeding...' : '↻ Seed demo graph'}
             </button>
           </div>
 
@@ -477,10 +477,10 @@ const [proposalDescription, setProposalDescription] = useState(
 
           <div className="action-row">
             <button className="button primary" onClick={discoverPaths} disabled={!!busy || !source.trim() || !target.trim()}>
-              {busy === 'paths' ? 'Searchingâ€¦' : 'âŒ• Discover paths'}
+              {busy === 'paths' ? 'Searching...' : '⌕ Discover paths'}
             </button>
             <button className="button secondary" onClick={analyzePaths} disabled={!!busy || !source.trim() || !target.trim()}>
-              {busy === 'analyze' ? 'Analyzingâ€¦' : 'â—ˆ Analyze risk'}
+              {busy === 'analyze' ? 'Analyzing...' : '◇ Analyze risk'}
             </button>
           </div>
         </section>
@@ -493,13 +493,13 @@ const [proposalDescription, setProposalDescription] = useState(
           </article>
           <article className="metric-card">
             <span className="metric-label">RISK SCORE</span>
-            <strong className="metric-word">{currentPath?.risk_score ?? 'â€”'}</strong>
+            <strong className="metric-word">{currentPath?.risk_score ?? '—'}</strong>
             <span className="metric-note">{currentPath?.risk_band ?? 'Run an analysis to calculate risk'}</span>
           </article>
           <article className="metric-card">
             <span className="metric-label">SIMULATED PATHS LEFT</span>
             <strong className="metric-word">
-              {verification ? verification.remaining_path_count : 'â€”'}
+              {verification ? verification.remaining_path_count : '—'}
             </strong>
             <span className="metric-note">
               {verification ? 'After excluding the selected edge' : 'Run verification to compare'}
@@ -548,7 +548,7 @@ const [proposalDescription, setProposalDescription] = useState(
             </div>
           ) : (
             <div className="empty-state">
-              <span className="empty-icon">âŒ•</span>
+              <span className="empty-icon">⌕</span>
               <strong>No graph loaded yet</strong>
               <p>Discover paths or analyze risk to visualize the returned graph evidence.</p>
             </div>
@@ -635,12 +635,12 @@ const [proposalDescription, setProposalDescription] = useState(
                     >
                       <div className="candidate-title">
                         <strong>{candidate.edge_id}</strong>
-                        <span className="risk-chip">Risk {candidate.risk ?? 'â€”'}</span>
+                        <span className="risk-chip">Risk {candidate.risk ?? '—'}</span>
                       </div>
                       <span>{candidate.relationship ?? candidate.relationship_kind}</span>
                       <small>
                         {candidate.paths_blocked ?? 0} path(s) blocked in simulation Â·{' '}
-                        {candidate.remaining_path_count_after_simulated_cut ?? 'â€”'} remaining
+                        {candidate.remaining_path_count_after_simulated_cut ?? '—'} remaining
                         <br />
                         Remediation cost: {candidate.remediation_cost ?? 'Unknown'}
                       </small>
@@ -649,7 +649,7 @@ const [proposalDescription, setProposalDescription] = useState(
                 </div>
 
                 <button className="button primary full-width" onClick={verifyFix} disabled={!!busy || !selectedEdge}>
-                  {busy === 'verify' ? 'Verifyingâ€¦' : 'âœ“ Verify simulated fix'}
+                  {busy === 'verify' ? 'Verifying...' : '✓ Verify simulated fix'}
                 </button>
               </>
             ) : (
@@ -704,7 +704,7 @@ const [proposalDescription, setProposalDescription] = useState(
               <h2>Workflow Center</h2>
             </div>
             <button className="button secondary" onClick={refreshWorkflowData} disabled={!!busy}>
-              {busy === 'workflow-refresh' ? 'Refreshingâ€¦' : 'Refresh workflows'}
+              {busy === 'workflow-refresh' ? 'Refreshing...' : 'Refresh workflows'}
             </button>
           </div>
 
@@ -724,7 +724,7 @@ const [proposalDescription, setProposalDescription] = useState(
               />
             </label>
             <button className="button primary" onClick={runAgentInvestigation} disabled={!!busy || !agentRequest.trim()}>
-              {busy === 'agent' ? 'Running investigationâ€¦' : 'Run agent investigation'}
+              {busy === 'agent' ? 'Running investigation...' : 'Run agent investigation'}
             </button>
           </article>
 
@@ -786,7 +786,7 @@ const [proposalDescription, setProposalDescription] = useState(
                 onClick={createProposal}
                 disabled={!!busy || !selectedRunId || !selectedEdge || !proposalDescription.trim()}
               >
-                {busy === 'proposal-create' ? 'Creatingâ€¦' : 'Create proposal from selected edge'}
+                {busy === 'proposal-create' ? 'Creating...' : 'Create proposal from selected edge'}
               </button>
               <p className="workflow-help">
                 Selected run: {selectedRunId || 'None'} Â· Selected edge: {selectedEdge || 'Analyze risk first'}
@@ -809,7 +809,7 @@ const [proposalDescription, setProposalDescription] = useState(
                       {proposal.status === 'pending' && (
                         <div className="workflow-actions">
                           <button className="button primary" onClick={() => decideProposal(proposal.proposal_id, 'approved')} disabled={!!busy}>
-                            {busy === `decision-${proposal.proposal_id}` ? 'Savingâ€¦' : 'Approve'}
+                            {busy === `decision-${proposal.proposal_id}` ? 'Saving...' : 'Approve'}
                           </button>
                           <button className="button secondary" onClick={() => decideProposal(proposal.proposal_id, 'rejected')} disabled={!!busy}>
                             Reject
@@ -819,7 +819,7 @@ const [proposalDescription, setProposalDescription] = useState(
 
                       {proposal.status === 'approved' && (
                         <button className="button primary" onClick={() => verifyProposal(proposal.proposal_id)} disabled={!!busy}>
-                          {busy === `verify-${proposal.proposal_id}` ? 'Verifyingâ€¦' : 'Verify in simulation'}
+                          {busy === `verify-${proposal.proposal_id}` ? 'Verifying...' : 'Verify in simulation'}
                         </button>
                       )}
 
