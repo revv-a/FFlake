@@ -12,8 +12,7 @@ import '@xyflow/react/dist/style.css'
 import './App.css'
 import './WorkflowCenter.css'
 
-const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
-
+const API = (import.meta.env.VITE_API_URL || 'https://fflake-backend.onrender.com').replace(/\/$/, '')
 type GraphNode = {
   id: string
   name: string
