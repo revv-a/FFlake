@@ -325,11 +325,6 @@ FalkorDB is the primary graph database and performs the core multi-hop capabilit
 
 ---
 
-## License
-
-No license file is present in the repository at the time of writing. All rights remain with the authors until a license is added. Contact the maintainers before redistributing or commercial use.
-
----
 
 ## Repository
 
