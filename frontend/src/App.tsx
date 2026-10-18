@@ -466,7 +466,7 @@ const [proposalDescription, setProposalDescription] = useState(
               <span>STARTING ENTITY</span>
               <input value={source} onChange={e => setSource(e.target.value)} />
             </label>
-            <div className="path-arrow">â†’</div>
+            <div className="path-arrow"> →</div>
             <label>
               <span>TARGET ENTITY</span>
               <input value={target} onChange={e => setTarget(e.target.value)} />
