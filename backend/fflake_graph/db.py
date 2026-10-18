@@ -23,8 +23,12 @@ def get_graph():
         "socket_connect_timeout": 3,
         "socket_timeout": 15,
     }
+    if config.username:
+        options["username"] = config.username
     if config.password:
         options["password"] = config.password
+    if config.ssl:
+        options["ssl"] = True
     client = FalkorDB(**options)
     return client.select_graph(config.graph_name)
 
