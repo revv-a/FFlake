@@ -106,6 +106,50 @@ ALLOWED_EDGE_KINDS = [
 ]
 
 
+def _demo_pair(source: str, target: str, description: str) -> dict:
+    try:
+        path_count = len(find_paths(source, target))
+    except Exception:  # pragma: no cover - presets must never break seeding
+        path_count = None
+
+    return {
+        "source": source,
+        "target": target,
+        "description": description,
+        "current_path_count": path_count,
+    }
+
+
+def demo_presets() -> list[dict]:
+    """Label convenient demo entity pairs computed against the live graph.
+
+    These are selectable examples only. Every investigation runs against the
+    entities the user actually chooses.
+    """
+    return [
+        _demo_pair(
+            "external-bot",
+            "prod-secrets",
+            "Default scenario: external automation identity to the "
+            "production secrets vault.",
+        ),
+        _demo_pair(
+            "webhook-runner",
+            "prod-secrets",
+            "Alternative path: the webhook runner to the vault.",
+        ),
+        _demo_pair(
+            "webhook-runner",
+            "ci-runner",
+            "Unreachable pair: exists in the graph but has no path, "
+            "to demonstrate the empty state.",
+        ),
+    ]
+
+
+DEMO_PRESETS = demo_presets()
+
+
 def seed_demo_graph() -> dict:
     """Upsert demo data without clearing existing graph data."""
 
@@ -147,14 +191,20 @@ def seed_demo_graph() -> dict:
             },
         )
 
+    from .engine import find_paths
+
+    default_paths = find_paths("external-bot", "prod-secrets")
+
     return {
         "seeded": True,
         "nodes": len(NODES),
         "relationships": len(EDGES),
         "source": "external-bot",
         "target": "prod-secrets",
+        "default_path_count": len(default_paths),
         "note": (
-            "Fictional demo data upserted; existing graph data "
+            "Fictional demo data upserted with MERGE; existing graph data "
             "was not cleared."
         ),
+        "presets": demo_presets(),
     }

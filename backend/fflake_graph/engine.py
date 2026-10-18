@@ -6,6 +6,73 @@ from typing import Any
 
 from .db import run_query
 from .demo import ALLOWED_EDGE_KINDS
+from .errors import EntityNotFoundError
+
+# Path discovery limits. These bound the search so results stay fast and
+# reviewable; they are reported in API responses via `path_limits`.
+MAX_HOPS = 6
+MAX_PATHS = 50
+
+RISK_BANDS = {
+    "critical": 20,
+    "high": 12,
+    "moderate": 6,
+}
+
+
+def risk_band(risk: int) -> str:
+    """Map a summed path risk score to a severity band.
+
+    Bands are additive: a longer path of medium-risk edges can reach a higher
+    band than a single high-risk edge. See README "Scoring semantics".
+    """
+    if risk >= RISK_BANDS["critical"]:
+        return "critical"
+    if risk >= RISK_BANDS["high"]:
+        return "high"
+    if risk >= RISK_BANDS["moderate"]:
+        return "moderate"
+    return "low"
+
+
+def require_entities(*entity_ids: str) -> None:
+    """Raise EntityNotFoundError when any requested node is absent from the graph."""
+    ids = [entity_id.strip() for entity_id in entity_ids if entity_id and entity_id.strip()]
+    if not ids:
+        raise ValueError("At least one entity id is required")
+
+    rows = run_query(
+        "MATCH (n:FFAsset) WHERE n.id IN $ids RETURN n.id",
+        {"ids": ids},
+    )
+    found = {str(row[0]) for row in rows if row and row[0] is not None}
+    missing = [entity_id for entity_id in ids if entity_id not in found]
+
+    if missing:
+        raise EntityNotFoundError(missing)
+
+
+def list_entities() -> list[dict[str, Any]]:
+    """List every node in the graph so clients can offer real entity pickers."""
+    rows = run_query(
+        """
+        MATCH (n:FFAsset)
+        RETURN n.id, n.name, n.kind, n.risk
+        ORDER BY n.kind, n.name
+        LIMIT 500
+        """
+    )
+    entities = []
+    for row in rows:
+        if not row or row[0] is None:
+            continue
+        entities.append({
+            "id": str(row[0]),
+            "name": row[1] if len(row) > 1 else None,
+            "kind": row[2] if len(row) > 2 else None,
+            "risk": int(row[3]) if len(row) > 3 and row[3] is not None else None,
+        })
+    return entities
 
 
 def _path_query(
@@ -21,8 +88,9 @@ def _path_query(
         )
         params["excluded_edge_id"] = excluded_edge_id
 
+    # One extra row is fetched so callers can detect truncation.
     query = f"""
-    MATCH p=(s:FFAsset {{id: $source}})-[:FF_REL*1..6]->(t:FFAsset {{id: $target}})
+    MATCH p=(s:FFAsset {{id: $source}})-[:FF_REL*1..{MAX_HOPS}]->(t:FFAsset {{id: $target}})
     WHERE all(r IN relationships(p) WHERE r.kind IN $allowed_kinds)
     {exclusion}
     RETURN
@@ -35,7 +103,7 @@ def _path_query(
           remediation_cost:r.remediation_cost,
           reason:r.reason
       }}] AS edges
-    LIMIT 50
+    LIMIT {MAX_PATHS + 1}
     """
     return query, params
 
@@ -45,6 +113,12 @@ def find_paths(
     target: str,
     excluded_edge_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Enumerate directed capability paths between two entities.
+
+    Bounded by MAX_HOPS hops and MAX_PATHS results, restricted to
+    ALLOWED_EDGE_KINDS. Results are deterministic: highest summed edge risk
+    first, then fewest hops.
+    """
     query, params = _path_query(excluded_edge_id)
     params.update({"source": source, "target": target})
     rows = run_query(query, params)
@@ -52,6 +126,12 @@ def find_paths(
     paths = []
     for row in rows:
         nodes, edges = row[0] or [], row[1] or []
+
+        # FalkorDB paths may revisit nodes; only simple paths are reported.
+        node_ids = [str(node.get("id")) for node in nodes]
+        if len(node_ids) != len(set(node_ids)):
+            continue
+
         risk = sum(int(edge.get("risk") or 0) for edge in edges)
 
         paths.append({
@@ -59,17 +139,16 @@ def find_paths(
             "edges": edges,
             "hops": len(edges),
             "risk_score": risk,
-            "risk_band": (
-                "critical" if risk >= 20 else
-                "high" if risk >= 12 else
-                "moderate" if risk >= 6 else
-                "low"
-            ),
+            "risk_band": risk_band(risk),
         })
 
+    paths = paths[:MAX_PATHS]
     paths.sort(
-        key=lambda item: (item["risk_score"], -item["hops"]),
-        reverse=True,
+        key=lambda item: (
+            -item["risk_score"],
+            item["hops"],
+            [str(edge.get("id")) for edge in item["edges"]],
+        ),
     )
     return paths
 
@@ -217,13 +296,16 @@ def analyze(source: str, target: str) -> dict[str, Any]:
 
     edge_frequency: Counter[str] = Counter()
     edge_meta: dict[str, dict[str, Any]] = {}
+    edge_paths: dict[str, list[int]] = {}
 
-    for path in paths:
+    for path_index, path in enumerate(paths):
         for edge in path["edges"]:
             edge_id = edge.get("id")
             if edge_id:
-                edge_frequency[str(edge_id)] += 1
-                edge_meta[str(edge_id)] = edge
+                edge_id = str(edge_id)
+                edge_frequency[edge_id] += 1
+                edge_meta[edge_id] = edge
+                edge_paths.setdefault(edge_id, []).append(path_index)
 
     candidates = []
 
@@ -235,6 +317,7 @@ def analyze(source: str, target: str) -> dict[str, Any]:
         )
         edge = edge_meta[edge_id]
         raw_cost = edge.get("remediation_cost")
+        affected_indexes = edge_paths.get(edge_id, [])
 
         candidates.append({
             "edge_id": edge_id,
@@ -246,8 +329,18 @@ def analyze(source: str, target: str) -> dict[str, Any]:
             ),
             "cost_was_assumed": raw_cost is None,
             "baseline_paths_containing_edge": count,
+            "affected_path_indexes": affected_indexes,
             "remaining_path_count_after_simulated_cut": len(remaining),
             "paths_blocked": max(0, len(paths) - len(remaining)),
+            "why_recommended": (
+                f"Observed on {count} of {len(paths)} enumerated path(s); "
+                f"excluding it during search leaves {len(remaining)} path(s)."
+            ),
+            "limitations": (
+                "Simulation only: excluding an edge during path search does "
+                "not modify the graph or any real permission. Remediation "
+                "cost is modeled metadata, not an executed change."
+            ),
             "simulation_only": True,
         })
 
@@ -287,6 +380,73 @@ def analyze(source: str, target: str) -> dict[str, Any]:
             "Graph-reachable capability paths for investigation, not "
             "proof of exploitability or a confirmed vulnerability."
         ),
+        "path_limits": {
+            "max_hops": MAX_HOPS,
+            "max_paths": MAX_PATHS,
+            "possibly_truncated": len(paths) >= MAX_PATHS,
+        },
+        "scoring": {
+            "method": "path_risk_score = sum of enumerated edge risk values",
+            "risk_bands": RISK_BANDS,
+            "ordering": "highest risk_score first, then fewest hops",
+        },
+    }
+
+
+def rank_chokepoints(
+    source: str,
+    target: str,
+    excluded_edge_id: str | None = None,
+) -> dict[str, Any]:
+    """Rank intermediate nodes by how often they appear on enumerated paths."""
+    paths = find_paths(source, target, excluded_edge_id=excluded_edge_id)
+    counts: Counter[str] = Counter()
+    details: dict[str, dict[str, Any]] = {}
+
+    for item in paths:
+        for node in item.get("nodes", [])[1:-1]:
+            node_id = node.get("id")
+            if not node_id:
+                continue
+            counts[str(node_id)] += 1
+            details[str(node_id)] = node
+
+    ranked = sorted(
+        counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
+    chokepoints = []
+    for node_id, count in ranked:
+        node = details[node_id]
+        chokepoints.append({
+            "rank": len(chokepoints) + 1,
+            "node_id": node_id,
+            "name": node.get("name", node_id),
+            "kind": node.get("kind"),
+            "paths_containing_node": count,
+            "total_paths": len(paths),
+            "path_participation_percent": (
+                round(100 * count / len(paths), 2) if paths else 0
+            ),
+            "interpretation": (
+                "Candidate chokepoint observed on enumerated paths; "
+                "evaluate the impact of restricting this component."
+            ),
+        })
+
+    return {
+        "source": source,
+        "target": target,
+        "graph": "fflake",
+        "paths_analyzed": len(paths),
+        "ranking_method": "dangerous_path_participation",
+        "chokepoints": chokepoints,
+        "limitations": (
+            "Ranks intermediate nodes on the enumerated paths only. "
+            "Path discovery is bounded, so this is not a minimum-cut "
+            "result or proof that removing a node is safe."
+        ),
     }
 
 
@@ -301,6 +461,7 @@ def verify_simulated_cut(
         target,
         excluded_edge_id=cut_edge_id,
     )
+    blocked = max(0, len(baseline) - len(remaining))
 
     return {
         "source": source,
@@ -308,6 +469,7 @@ def verify_simulated_cut(
         "cut_edge_id": cut_edge_id,
         "baseline_path_count": len(baseline),
         "remaining_path_count": len(remaining),
+        "paths_blocked_by_cut": blocked,
         "verified_in_simulation": bool(baseline) and not remaining,
         "simulation_only": True,
         "important": (

@@ -12,8 +12,7 @@ import '@xyflow/react/dist/style.css'
 import './App.css'
 import './WorkflowCenter.css'
 
-const API = 'http://127.0.0.1:8000'
-
+const API = (import.meta.env.VITE_API_URL || 'https://fflake-backend.onrender.com').replace(/\/$/, '')
 type GraphNode = {
   id: string
   name: string
@@ -343,7 +342,7 @@ const [proposalDescription, setProposalDescription] = useState(
           label: (
             <div className="graph-node-content">
               <strong>{node.name}</strong>
-              <span>{node.kind ?? 'entity'} · Risk {risk}</span>
+              <span>{node.kind ?? 'entity'} Â· Risk {risk}</span>
             </div>
           ),
         },
@@ -407,16 +406,14 @@ const [proposalDescription, setProposalDescription] = useState(
         </div>
 
         <div className="side-label">WORKSPACE</div>
-        <div className="nav-item active">◈ <span>Graph investigation</span></div>
-        <div className="nav-item">⌘ <span>Capability paths</span></div>
-        <div className="nav-item">⛨ <span>Safety & verification</span></div>
+        <div className="nav-item active">◇ <span>Graph investigation</span></div>
 
         <div className="sidebar-bottom">
           <div className="status-line">
             <span className={`status-dot ${health ? 'online' : ''}`} />
             <span>{health ? 'Graph connected' : 'Graph unavailable'}</span>
           </div>
-          <span className="muted small">FalkorDB · Local workspace</span>
+          <span className="muted small">FalkorDB Â· Local workspace</span>
         </div>
       </aside>
 
@@ -433,7 +430,7 @@ const [proposalDescription, setProposalDescription] = useState(
         </header>
 
         <div className="connection-banner">
-          <div className="connection-icon">◈</div>
+          <div className="connection-icon">◇</div>
           <div className="connection-copy">
             <strong>{health ? 'FalkorDB is reachable' : 'Graph connection unavailable'}</strong>
             <span>{health ? 'Live graph health check passed.' : 'Check the backend and FalkorDB container.'}</span>
@@ -460,7 +457,7 @@ const [proposalDescription, setProposalDescription] = useState(
               <h2>Trace a capability path</h2>
             </div>
             <button className="button secondary" onClick={seedGraph} disabled={!!busy}>
-              {busy === 'seed' ? 'Seeding…' : '↻ Seed demo graph'}
+              {busy === 'seed' ? 'Seeding...' : '↻ Seed demo graph'}
             </button>
           </div>
 
@@ -469,7 +466,7 @@ const [proposalDescription, setProposalDescription] = useState(
               <span>STARTING ENTITY</span>
               <input value={source} onChange={e => setSource(e.target.value)} />
             </label>
-            <div className="path-arrow">→</div>
+            <div className="path-arrow"> →</div>
             <label>
               <span>TARGET ENTITY</span>
               <input value={target} onChange={e => setTarget(e.target.value)} />
@@ -478,10 +475,10 @@ const [proposalDescription, setProposalDescription] = useState(
 
           <div className="action-row">
             <button className="button primary" onClick={discoverPaths} disabled={!!busy || !source.trim() || !target.trim()}>
-              {busy === 'paths' ? 'Searching…' : '⌕ Discover paths'}
+              {busy === 'paths' ? 'Searching...' : '⌕ Discover paths'}
             </button>
             <button className="button secondary" onClick={analyzePaths} disabled={!!busy || !source.trim() || !target.trim()}>
-              {busy === 'analyze' ? 'Analyzing…' : '◈ Analyze risk'}
+              {busy === 'analyze' ? 'Analyzing...' : '◇ Analyze risk'}
             </button>
           </div>
         </section>
@@ -621,7 +618,7 @@ const [proposalDescription, setProposalDescription] = useState(
                   >
                     {analysis.candidate_fixes.map(candidate => (
                       <option key={candidate.edge_id} value={candidate.edge_id}>
-                        {candidate.edge_id} · blocks {candidate.paths_blocked ?? 0} path(s)
+                        {candidate.edge_id} Â· blocks {candidate.paths_blocked ?? 0} path(s)
                       </option>
                     ))}
                   </select>
@@ -640,7 +637,7 @@ const [proposalDescription, setProposalDescription] = useState(
                       </div>
                       <span>{candidate.relationship ?? candidate.relationship_kind}</span>
                       <small>
-                        {candidate.paths_blocked ?? 0} path(s) blocked in simulation ·{' '}
+                        {candidate.paths_blocked ?? 0} path(s) blocked in simulation Â·{' '}
                         {candidate.remaining_path_count_after_simulated_cut ?? '—'} remaining
                         <br />
                         Remediation cost: {candidate.remediation_cost ?? 'Unknown'}
@@ -650,7 +647,7 @@ const [proposalDescription, setProposalDescription] = useState(
                 </div>
 
                 <button className="button primary full-width" onClick={verifyFix} disabled={!!busy || !selectedEdge}>
-                  {busy === 'verify' ? 'Verifying…' : '✓ Verify simulated fix'}
+                  {busy === 'verify' ? 'Verifying...' : '✓ Verify simulated fix'}
                 </button>
               </>
             ) : (
@@ -705,7 +702,7 @@ const [proposalDescription, setProposalDescription] = useState(
               <h2>Workflow Center</h2>
             </div>
             <button className="button secondary" onClick={refreshWorkflowData} disabled={!!busy}>
-              {busy === 'workflow-refresh' ? 'Refreshing…' : 'Refresh workflows'}
+              {busy === 'workflow-refresh' ? 'Refreshing...' : 'Refresh workflows'}
             </button>
           </div>
 
@@ -725,7 +722,7 @@ const [proposalDescription, setProposalDescription] = useState(
               />
             </label>
             <button className="button primary" onClick={runAgentInvestigation} disabled={!!busy || !agentRequest.trim()}>
-              {busy === 'agent' ? 'Running investigation…' : 'Run agent investigation'}
+              {busy === 'agent' ? 'Running investigation...' : 'Run agent investigation'}
             </button>
           </article>
 
@@ -787,10 +784,10 @@ const [proposalDescription, setProposalDescription] = useState(
                 onClick={createProposal}
                 disabled={!!busy || !selectedRunId || !selectedEdge || !proposalDescription.trim()}
               >
-                {busy === 'proposal-create' ? 'Creating…' : 'Create proposal from selected edge'}
+                {busy === 'proposal-create' ? 'Creating...' : 'Create proposal from selected edge'}
               </button>
               <p className="workflow-help">
-                Selected run: {selectedRunId || 'None'} · Selected edge: {selectedEdge || 'Analyze risk first'}
+                Selected run: {selectedRunId || 'None'} Â· Selected edge: {selectedEdge || 'Analyze risk first'}
               </p>
 
               {proposals.length > 0 ? (
@@ -804,13 +801,13 @@ const [proposalDescription, setProposalDescription] = useState(
                         </span>
                       </span>
                       <p>{proposal.description}</p>
-                      <small>{proposal.source} → {proposal.target}</small>
+                      <small>{proposal.source} â†’ {proposal.target}</small>
                       <small className="workflow-id">Proposal: {proposal.proposal_id}</small>
 
                       {proposal.status === 'pending' && (
                         <div className="workflow-actions">
                           <button className="button primary" onClick={() => decideProposal(proposal.proposal_id, 'approved')} disabled={!!busy}>
-                            {busy === `decision-${proposal.proposal_id}` ? 'Saving…' : 'Approve'}
+                            {busy === `decision-${proposal.proposal_id}` ? 'Saving...' : 'Approve'}
                           </button>
                           <button className="button secondary" onClick={() => decideProposal(proposal.proposal_id, 'rejected')} disabled={!!busy}>
                             Reject
@@ -820,7 +817,7 @@ const [proposalDescription, setProposalDescription] = useState(
 
                       {proposal.status === 'approved' && (
                         <button className="button primary" onClick={() => verifyProposal(proposal.proposal_id)} disabled={!!busy}>
-                          {busy === `verify-${proposal.proposal_id}` ? 'Verifying…' : 'Verify in simulation'}
+                          {busy === `verify-${proposal.proposal_id}` ? 'Verifying...' : 'Verify in simulation'}
                         </button>
                       )}
 
@@ -828,7 +825,7 @@ const [proposalDescription, setProposalDescription] = useState(
                         <div className="verification-summary">
                           <strong>{proposal.verification.verified_in_simulation ? 'No path in simulation' : 'Path remains in simulation'}</strong>
                           <span>
-                            Baseline: {proposal.verification.baseline_path_count} · Remaining: {proposal.verification.remaining_path_count}
+                            Baseline: {proposal.verification.baseline_path_count} Â· Remaining: {proposal.verification.remaining_path_count}
                           </span>
                         </div>
                       )}
@@ -849,8 +846,8 @@ const [proposalDescription, setProposalDescription] = useState(
         </section>
 
         <footer className="footer">
-          <span>FFlake · Graph-native context for AI agents</span>
-          <span>Evidence first · Human-reviewed actions</span>
+          <span>FFlake Â· Graph-native context for AI agents</span>
+          <span>Evidence first Â· Human-reviewed actions</span>
         </footer>
       </section>
     </main>
@@ -858,3 +855,4 @@ const [proposalDescription, setProposalDescription] = useState(
 }
 
 export default App
+

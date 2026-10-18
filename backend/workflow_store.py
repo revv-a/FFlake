@@ -8,11 +8,52 @@ from typing import Any
 DB_PATH = Path(__file__).resolve().parent / "data" / "fflake_workflow.db"
 
 
+class NotFoundError(ValueError):
+    """Raised when a referenced record does not exist."""
+
+
+class ConflictError(ValueError):
+    """Raised when an operation conflicts with the current record state."""
+
+
+class NotFoundError(ValueError):
+    """Raised when a referenced record does not exist."""
+
+
+class ConflictError(ValueError):
+    """Raised when an operation conflicts with the current record state."""
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
+    # WAL keeps readers (listing endpoints) from blocking writers (decisions).
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=10000")
     return connection
+
+
+
+def _record_event(
+    connection: sqlite3.Connection,
+    proposal_id: str,
+    event: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Append an audit event within the caller's database transaction."""
+    connection.execute(
+        """
+        INSERT INTO proposal_events (proposal_id, event, detail, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            proposal_id,
+            event,
+            json.dumps(detail, default=str) if detail is not None else None,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
 
 
 def initialize_store() -> None:
@@ -47,6 +88,24 @@ def initialize_store() -> None:
                     REFERENCES investigation_runs(run_id)
             )
         """)
+
+        # Immutable audit trail of human decisions and simulations.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS proposal_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proposal_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_proposal_events_proposal
+            ON proposal_events (proposal_id, event_id)
+            """
+        )
+        connection.commit()
 
 
 def save_investigation(run: dict[str, Any]) -> None:
@@ -113,7 +172,23 @@ def create_proposal(
         ).fetchone()
 
         if run is None:
-            raise ValueError("Investigation run was not found")
+            raise NotFoundError("Investigation run was not found")
+
+        duplicate = connection.execute(
+            """
+            SELECT proposal_id, status FROM fix_proposals
+            WHERE source = ? AND target = ? AND edge_id = ?
+              AND status IN ('pending', 'approved')
+            """,
+            (source, target, edge_id),
+        ).fetchone()
+
+        if duplicate is not None:
+            raise ConflictError(
+                f"An active proposal {duplicate['proposal_id']} already "
+                f"exists for edge '{edge_id}' on {source} -> {target} "
+                f"(status: {duplicate['status']})"
+            )
 
         connection.execute(
             """
@@ -127,6 +202,17 @@ def create_proposal(
                 description, now, now,
             ),
         )
+        _record_event(
+            connection,
+            proposal_id,
+            "created",
+            {
+                "run_id": run_id,
+                "source": source,
+                "target": target,
+                "edge_id": edge_id,
+            },
+        )
 
     return {
         "proposal_id": proposal_id,
@@ -138,8 +224,54 @@ def create_proposal(
         "status": "pending",
         "created_at": now,
         "updated_at": now,
+        "verification": None,
         "real_changes_performed": False,
     }
+
+
+
+def _row_to_proposal(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert a SQLite proposal row into the API response structure."""
+    proposal = dict(row)
+    raw_verification = proposal.pop("verification_json", None)
+    if raw_verification:
+        try:
+            proposal["verification"] = json.loads(raw_verification)
+        except (json.JSONDecodeError, TypeError):
+            proposal["verification"] = None
+    else:
+        proposal["verification"] = None
+    return proposal
+
+
+
+def list_events(proposal_id: str) -> list[dict[str, Any]]:
+    """Return the audit trail for a proposal in chronological order."""
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT event_id, proposal_id, event, detail, created_at
+            FROM proposal_events
+            WHERE proposal_id = ?
+            ORDER BY event_id ASC
+            """,
+            (proposal_id,),
+        ).fetchall()
+
+    events = []
+    for row in rows:
+        item = dict(row)
+        raw_detail = item.get("detail")
+        if raw_detail:
+            try:
+                item["detail"] = json.loads(raw_detail)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        else:
+            item["detail"] = None
+        events.append(item)
+
+    return events
 
 
 def list_proposals() -> list[dict[str, Any]]:
@@ -154,17 +286,32 @@ def list_proposals() -> list[dict[str, Any]]:
             """
         ).fetchall()
 
-    return [
-        {
-            **dict(row),
-            "verification": (
-                json.loads(row["verification_json"])
-                if row["verification_json"] else None
-            ),
-            "verification_json": None,
-        }
-        for row in rows
-    ]
+    proposals = [_row_to_proposal(row) for row in rows]
+    for proposal in proposals:
+        proposal["audit_trail"] = list_events(proposal["proposal_id"])
+    return proposals
+
+
+def get_proposal(proposal_id: str) -> dict[str, Any]:
+    """Fetch one proposal, or raise NotFoundError."""
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT proposal_id, run_id, source, target, edge_id,
+                   description, status, created_at, updated_at,
+                   verification_json
+            FROM fix_proposals
+            WHERE proposal_id = ?
+            """,
+            (proposal_id,),
+        ).fetchone()
+
+    if row is None:
+        raise NotFoundError("Proposal was not found")
+
+    proposal = _row_to_proposal(row)
+    proposal["audit_trail"] = list_events(proposal_id)
+    return proposal
 
 
 def set_proposal_status(
@@ -194,12 +341,14 @@ def set_proposal_status(
             ).fetchone()
 
             if exists is None:
-                raise ValueError("Proposal was not found")
+                raise NotFoundError("Proposal was not found")
 
-            raise ValueError(
+            raise ConflictError(
                 f"Proposal is already {exists['status']}; "
                 "only pending proposals can be decided"
             )
+
+        _record_event(connection, proposal_id, new_status)
 
         row = connection.execute(
             "SELECT * FROM fix_proposals WHERE proposal_id = ?",
@@ -243,10 +392,74 @@ def save_verification(
         )
 
         if cursor.rowcount == 0:
-            raise ValueError(
+            raise ConflictError(
                 "Proposal must be approved and its source, target, "
                 "and edge must match the verification result"
             )
+
+        _record_event(
+            connection,
+            proposal_id,
+            "simulation_verified",
+            verification,
+        )
+
+        row = connection.execute(
+            "SELECT * FROM fix_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+
+    return dict(row)
+
+
+def record_simulation(
+    proposal_id: str,
+    verification: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist a simulation result for an approved proposal.
+
+    A successful simulation (all enumerated paths blocked) promotes the
+    proposal to 'verified'. An unsuccessful simulation is recorded in the
+    audit trail and attached as evidence, but the proposal stays 'approved'
+    so it can be reconsidered or re-simulated later.
+    """
+    if not verification.get("simulation_only"):
+        raise ValueError("Only simulation results may be recorded")
+
+    if verification.get("verified_in_simulation"):
+        return save_verification(proposal_id, verification)
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with _connect() as connection:
+        exists = connection.execute(
+            "SELECT status FROM fix_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+
+        if exists is None:
+            raise NotFoundError("Proposal was not found")
+
+        if exists["status"] != "approved":
+            raise ConflictError(
+                "Only approved proposals can be verified; current "
+                f"status is '{exists['status']}'"
+            )
+
+        connection.execute(
+            """
+            UPDATE fix_proposals
+            SET updated_at = ?, verification_json = ?
+            WHERE proposal_id = ? AND status = 'approved'
+            """,
+            (now, json.dumps(verification, default=str), proposal_id),
+        )
+        _record_event(
+            connection,
+            proposal_id,
+            "simulation_inconclusive",
+            verification,
+        )
 
         row = connection.execute(
             "SELECT * FROM fix_proposals WHERE proposal_id = ?",
